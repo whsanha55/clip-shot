@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <main class="page">
+    <h1>Clip Shot 설정</h1>
+
+    <form id="options-form">
+      <label class="field">
+        <span class="field-label">최대 캡처 높이 (CSS px)</span>
+        <input type="number" id="max-height" min="5000" max="30000" step="500" value="15000" />
+        <span class="field-desc">5,000 ~ 30,000. 실제 적용값은 <code>min(이 값, 32,000 ÷ DPR)</code>입니다.</span>
+      </label>
+
+      <label class="field">
+        <span class="field-label">한도 도달 시 동작</span>
+        <select id="on-limit">
+          <option value="truncate">잘라서 복사 (기본)</option>
+          <option value="cancel">캡처 취소</option>
+        </select>
+        <span class="field-desc">페이지가 최대 높이보다 길 때의 동작입니다.</span>
+      </label>
+
+      <label class="field">
+        <span class="field-label">파일명 접두사</span>
+        <input type="text" id="filename-prefix" value="clip-shot" maxlength="40" />
+        <span class="field-desc">예: <code>clip-shot-20260930-141500.png</code></span>
+      </label>
+
+      <label class="field field-row">
+        <input type="checkbox" id="auto-save" />
+        <span class="field-label">캡처 후 자동 저장</span>
+        <span class="field-desc">클립보드 복사와 동시에 PNG 파일로 저장합니다.</span>
+      </label>
+
+      <div class="actions">
+        <button type="submit" class="primary">저장</button>
+        <span id="save-status" class="save-status" role="status"></span>
+      </div>
+    </form>
+
+    <p class="shortcut-note">
+      단축키는 <a href="chrome://extensions/shortcuts" target="_blank">chrome://extensions/shortcuts</a>에서 변경할 수 있습니다.
+      (기본: Mac <code>⌘⇧S</code>, Windows/Linux <code>Alt+Shift+S</code>)
+    </p>
+  </main>
+
+  <script src="options.js"></script>
+</body>
+</html>
