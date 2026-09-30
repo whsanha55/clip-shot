@@ -57,7 +57,11 @@ function getWorker() {
             .catch(() => {});
         },
       });
-      await worker.setParameters({ preserve_interword_spaces: '1' });
+      await worker.setParameters({
+        preserve_interword_spaces: '1',
+        // "Estimating resolution as N" 같은 디버그 출력이 확장 오류 목록에 쌓이지 않게 버린다
+        debug_file: '/dev/null',
+      });
       return worker;
     })();
     workerPromise.catch(() => { workerPromise = null; }); // 실패하면 다음 요청에서 재시도
