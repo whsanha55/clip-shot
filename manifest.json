@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Clip Shot",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "캡처하면 즉시 클립보드에 복사되는 스크린샷 확장 프로그램",
   "minimum_chrome_version": "116",
   "icons": {
@@ -27,9 +27,6 @@
     "clipboardWrite",
     "scripting",
     "storage"
-  ],
-  "host_permissions": [
-    "<all_urls>"
   ],
   "commands": {
     "capture-partial": {

@@ -43,7 +43,7 @@
 
 | 파일 | 역할 |
 |---|---|
-| `manifest.json` | MV3 매니페스트 (권한: activeTab, clipboardWrite, scripting, storage + `<all_urls>` 호스트) |
+| `manifest.json` | MV3 매니페스트 (권한: activeTab, clipboardWrite, scripting, storage) |
 | `background.js` | Service Worker — `captureVisibleTab` 호출, 엔진 주입, 단축키 라우팅, 설정 소유 |
 | `content/capture.js` | 캡처 엔진 — 선택 UI · DPR 보정 crop · 스크롤 이어붙임 · 고정 요소 숨김 · 클립보드 쓰기 · 저장 |
 | `popup/` | 모드 선택 + 보이는 영역 클립보드 쓰기/저장 |
@@ -55,7 +55,7 @@
 - **클립보드 쓰기는 포커스를 가진 문서에서만 동작**한다. 그래서 보이는 영역(팝업 클릭 직후)은 팝업이, 부분/전체/단축키(페이지 조작 직후)는 콘텐츠 스크립트가 쓴다.
 - **이어붙임 속도**: `captureVisibleTab`이 Chrome 정책상 초당 2회로 제한되어 장당 최소 ~0.5초가 필요하다. 호출 간격을 추적해 불필요한 대기는 제거했다.
 - **저장은 blob anchor 다운로드**로 동작한다 — `chrome.downloads` 권한 없이, 데이터 URL 크기 제한 없이, 클릭한 컨텍스트에서 즉시 내려받는다.
-- **단축키는 활성 탭 주입이 필요**해 `host_permissions: <all_urls>`를 사용한다. 웹스토어 등록(M6) 시 선택적 권한(`optional_host_permissions`) 전환을 검토한다.
+- **호스트 권한 없이 activeTab만 쓴다** — 팝업 클릭과 `commands` 단축키 모두 activeTab을 부여하므로 `<all_urls>`가 필요 없다.
 - **이미지 미리보기는 제거됨** — 콘텐츠 스크립트가 만든 요소는 페이지 CSP를 따라 `blob:` 이미지가 깨지는 사이트가 있어 페이지 내 미리보기를 제거했고, 팝업 썸네일도 요청으로 함께 제거했다. 결과는 배지 텍스트(크기 포함)로 안내한다.
 
 ## 로드맵
