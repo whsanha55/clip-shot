@@ -24,6 +24,10 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const type = message?.type;
+    if (type === 'OCR_PROGRESS') {
+      if (onOcrProgress) onOcrProgress(message);
+      return;
+    }
     if (type !== 'RUN_PARTIAL' && type !== 'RUN_FULL' && type !== 'RUN_OCR') return;
     sendResponse({ ok: true });
     if (ocrBusy) return; // 인식이 끝날 때까지 새 작업은 무시한다
@@ -272,17 +276,20 @@
 
   // ── OCR ───────────────────────────────────────────────────────────
 
+  // 재시도할 때마다 순서대로 바꿔 보는 처리 방식 (같은 이미지·같은 설정이면 결과가 같다).
+  // scale: 기기 픽셀 기준 확대 배율, psm: Tesseract 페이지 분할 모드(3 자동, 6 단일 블록, 4 단일 열)
+  const OCR_VARIANTS = [
+    { name: '기본', scale: (dpr) => (dpr < 2 ? 2 : 1), filter: 'none', psm: '3' },
+    { name: '흑백·2배·단일 블록', scale: () => 2, filter: 'grayscale(1) contrast(1.5)', psm: '6' },
+    { name: '3배·단일 열', scale: () => 3, filter: 'none', psm: '4' },
+  ];
+  const MAX_OCR_CANVAS = 8000; // 확대 후 한 변 최대 px (메모리·시간 제한)
+
+  let onOcrProgress = null; // 인식 진행률 수신 (background가 offscreen 진행률을 전달)
+
   // rect: 페이지 CSS px (OCR 선택은 스크롤이 없으므로 뷰포트 안에 있다)
   async function runOcr(rect) {
     ocrBusy = true;
-    const t0 = performance.now();
-    let onEsc = null;
-    const aborted = new Promise((resolve) => {
-      onEsc = (e) => { if (e.key === 'Escape') resolve('aborted'); };
-      window.addEventListener('keydown', onEsc, true);
-    });
-    let shield = null;
-
     try {
       // 오버레이 제거가 화면 프레임에 반영된 뒤에 캡처해야 선택 박스가 안 찍힌다
       await nextFrames(2);
@@ -290,22 +297,52 @@
       const sy = window.scrollY;
       const dpr = window.devicePixelRatio;
       const res = await requestCapture();
-      shield = createShield('텍스트 인식 중… (Esc 취소)');
-
       const bmp = await fetchBitmap(res.dataUrl);
       const r = computeCropRect({ x: rect.x - sx, y: rect.y - sy, w: rect.w, h: rect.h }, dpr, bmp.width, bmp.height);
-      // 저해상도 화면은 2배 확대해야 작은 글자 인식률이 오른다
-      const scale = dpr < 2 ? 2 : 1;
+      // 재시도에 다시 쓰도록 잘라낸 원본(기기 px)을 보관한다
+      const source = document.createElement('canvas');
+      source.width = r.w;
+      source.height = r.h;
+      source.getContext('2d').drawImage(bmp, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+      bmp.close();
+      const region = { left: r.x / dpr + sx, top: r.y / dpr + sy, w: r.w / dpr, h: r.h / dpr };
+      await recognizeAndShow(source, region, dpr, 0);
+    } catch (err) {
+      showBadge('텍스트 인식 실패: ' + describeError(err), true);
+    } finally {
+      ocrBusy = false;
+    }
+  }
+
+  // 실패·취소 시 기존 레이어(재시도 전 결과)는 그대로 둔다
+  async function recognizeAndShow(source, region, dpr, variantIndex) {
+    ocrBusy = true;
+    const variant = OCR_VARIANTS[variantIndex];
+    const t0 = performance.now();
+    let onEsc = null;
+    const aborted = new Promise((resolve) => {
+      onEsc = (e) => { if (e.key === 'Escape') resolve('aborted'); };
+      window.addEventListener('keydown', onEsc, true);
+    });
+    const shield = createShield('텍스트 인식 준비 중… (Esc 취소)');
+    onOcrProgress = (p) => {
+      shield.update(p.status === 'recognizing text'
+        ? '텍스트 인식 중… ' + Math.round(p.progress * 100) + '% (Esc 취소)'
+        : '텍스트 인식 준비 중… (Esc 취소)');
+    };
+
+    try {
+      const scale = Math.min(variant.scale(dpr), MAX_OCR_CANVAS / Math.max(source.width, source.height));
       const canvas = document.createElement('canvas');
-      canvas.width = r.w * scale;
-      canvas.height = r.h * scale;
+      canvas.width = Math.round(source.width * scale);
+      canvas.height = Math.round(source.height * scale);
       const ctx = canvas.getContext('2d');
       ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(bmp, r.x, r.y, r.w, r.h, 0, 0, canvas.width, canvas.height);
-      bmp.close();
+      ctx.filter = variant.filter;
+      ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
 
       const result = await Promise.race([
-        chrome.runtime.sendMessage({ type: 'OCR_RECOGNIZE', dataUrl: canvas.toDataURL('image/png') }),
+        chrome.runtime.sendMessage({ type: 'OCR_RECOGNIZE', dataUrl: canvas.toDataURL('image/png'), psm: variant.psm }),
         aborted,
         sleep(OCR_TIMEOUT_MS).then(() => ({ ok: false, error: '인식 시간 초과' })),
       ]);
@@ -315,12 +352,12 @@
       }
       if (!result?.ok) throw new Error(result?.error ?? '알 수 없는 오류');
       if (result.lines.length === 0) {
-        showBadge('인식된 텍스트가 없습니다', true);
+        showBadge('인식된 텍스트가 없습니다 (' + variant.name + ')', true);
         return;
       }
 
       // bbox(확대된 이미지 px) → 영역 기준 CSS px
-      const k = dpr * scale;
+      const k = canvas.width / (source.width / dpr);
       const lines = assignParagraphs(result.lines.map((l) => ({
         text: l.text,
         x: l.bbox.x0 / k,
@@ -328,15 +365,18 @@
         w: (l.bbox.x1 - l.bbox.x0) / k,
         h: (l.bbox.y1 - l.bbox.y0) / k,
       })));
-      shield.remove();
-      shield = null;
-      renderTextLayer({ left: r.x / dpr + sx, top: r.y / dpr + sy, w: r.w / dpr, h: r.h / dpr }, lines);
-      console.log('[clip-shot] ocr ms', Math.round(performance.now() - t0));
+      if (closeTextLayer) closeTextLayer();
+      renderTextLayer(region, lines, {
+        variantName: variant.name,
+        onRetry: () => recognizeAndShow(source, region, dpr, (variantIndex + 1) % OCR_VARIANTS.length),
+      });
+      console.log('[clip-shot] ocr ms', Math.round(performance.now() - t0), variant.name);
     } catch (err) {
       showBadge('텍스트 인식 실패: ' + describeError(err), true);
     } finally {
       window.removeEventListener('keydown', onEsc, true);
-      if (shield) shield.remove();
+      onOcrProgress = null;
+      shield.remove();
       ocrBusy = false;
     }
   }
@@ -358,7 +398,8 @@
 
   // 원문 위에 선택 가능한 투명 텍스트를 겹친다 (macOS 라이브 텍스트 방식).
   // 페이지 CSS·복사 차단 스크립트의 영향을 줄이려고 closed Shadow DOM에 그린다.
-  function renderTextLayer(region, lines) {
+  // opts: { variantName, onRetry } — 툴바의 처리 방식 표시와 [재시도] 동작
+  function renderTextLayer(region, lines, opts) {
     const host = document.createElement('div');
     host.setAttribute('data-clip-shot', '1');
     host.style.cssText =
@@ -367,6 +408,15 @@
     const root = host.attachShadow({ mode: 'closed' });
 
     const barInside = region.top - window.scrollY < 40; // 위에 공간이 없으면 영역 안쪽에 둔다
+    // 결과 패널: 오른쪽 → 왼쪽 → 아래 순서로 화면 안에 들어가는 곳에 둔다
+    const PANEL_W = 320;
+    const GAP = 12;
+    const vpLeft = region.left - window.scrollX;
+    const panelPos = vpLeft + region.w + GAP + PANEL_W <= window.innerWidth
+      ? 'left:' + (region.w + GAP) + 'px;top:0'
+      : vpLeft >= PANEL_W + GAP
+        ? 'left:' + -(PANEL_W + GAP) + 'px;top:0'
+        : 'left:0;top:' + (region.h + GAP) + 'px';
     root.innerHTML =
       '<style>' +
       ':host{all:initial}' +
@@ -381,11 +431,23 @@
       'background:#374151;color:#fff}' +
       '.bar button.primary{background:#4f46e5}' +
       '.bar span{padding:0 4px;color:#cbd5e1}' +
+      '.line.hl{background:rgba(250,204,21,.35)}' +
+      '.panel{position:absolute;' + panelPos + ';width:' + PANEL_W + 'px;max-height:' + Math.max(region.h, 240) + 'px;' +
+      'overflow:auto;box-sizing:border-box;padding:10px 12px;border-radius:10px;background:#fff;color:#1f2430;' +
+      'border:1px solid #e5e7eb;box-shadow:0 8px 24px rgba(0,0,0,.18);font:13px/1.55 system-ui,sans-serif;' +
+      'user-select:text;-webkit-user-select:text;cursor:text}' +
+      '.panel h2{margin:0 0 6px;font-size:12px;font-weight:600;color:#6b7280;user-select:none;-webkit-user-select:none}' +
+      '.row{padding:1px 4px;border-radius:4px;white-space:pre-wrap;word-break:break-all}' +
+      '.row.para{margin-top:10px}' +
+      '.row:hover{background:#eef2ff}' +
       '</style>' +
       '<div class="frame"></div>' +
       '<div class="bar"><button class="primary" data-act="copy">전체 복사</button>' +
-      '<button data-act="close">닫기</button><span></span></div>';
-    root.querySelector('.bar span').textContent = lines.length + '줄 인식';
+      '<button data-act="retry">재시도</button>' +
+      '<button data-act="close">닫기</button><span></span></div>' +
+      '<div class="panel"><h2></h2></div>';
+    root.querySelector('.bar span').textContent = lines.length + '줄 · ' + opts.variantName;
+    root.querySelector('.panel h2').textContent = '인식 결과 — 줄에 올리면 원문 위치 표시';
 
     const frame = root.querySelector('.frame');
     const lineEls = lines.map((l) => {
@@ -399,6 +461,17 @@
       el.style.fontSize = l.h * 0.85 + 'px';
       frame.appendChild(el);
       return el;
+    });
+
+    // 결과 패널: 줄마다 한 행, 올리면 원문의 해당 줄을 강조한다
+    const panel = root.querySelector('.panel');
+    lines.forEach((l, i) => {
+      const row = document.createElement('div');
+      row.className = 'row' + (i > 0 && l.paragraph !== lines[i - 1].paragraph ? ' para' : '');
+      row.textContent = l.text;
+      row.addEventListener('mouseenter', () => lineEls[i].classList.add('hl'));
+      row.addEventListener('mouseleave', () => lineEls[i].classList.remove('hl'));
+      panel.appendChild(row);
     });
 
     document.documentElement.appendChild(host);
@@ -422,6 +495,7 @@
     function selectedText() {
       const sel = root.getSelection ? root.getSelection() : document.getSelection();
       if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return '';
+      if (panel.contains(sel.anchorNode)) return sel.toString(); // 패널에서 고른 글은 그대로
       const range = sel.getRangeAt(0);
       const parts = [];
       lineEls.forEach((el, i) => {
@@ -445,6 +519,7 @@
     }
 
     function onKeyDown(e) {
+      if (ocrBusy) return; // 재시도 중 Esc는 인식 취소로만 쓴다
       if (e.key === 'Escape') {
         close();
         return;
@@ -459,6 +534,7 @@
       }
     }
     function onOutsidePointer(e) {
+      if (ocrBusy) return; // 재시도 중에는 진행 표시가 화면을 덮는다
       if (!e.composedPath().includes(host)) close();
     }
     function close() {
@@ -472,6 +548,7 @@
     root.querySelector('.bar').addEventListener('click', (e) => {
       const act = e.target.closest('button')?.dataset.act;
       if (act === 'copy') copy(joinLines(lines));
+      else if (act === 'retry' && !ocrBusy) opts.onRetry();
       else if (act === 'close') close();
     });
     // 레이어 안의 선택·복사 이벤트가 페이지의 차단 핸들러까지 올라가지 않게 한다

@@ -19,7 +19,7 @@ const START_TO_RUN = {
   START_OCR: 'RUN_OCR',
 };
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.target === 'offscreen') return; // offscreen 문서가 처리한다
   if (message?.type === 'CAPTURE_VISIBLE') {
     captureVisible()
@@ -33,8 +33,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: describeError(err) }));
     return true; // 비동기 응답
   }
+  if (message?.type === 'OCR_PROGRESS') {
+    if (ocrTabId !== null) {
+      chrome.tabs.sendMessage(ocrTabId, { type: 'OCR_PROGRESS', status: message.status, progress: message.progress })
+        .catch(() => {});
+    }
+    return;
+  }
   if (message?.type === 'OCR_RECOGNIZE') {
-    recognize(message.dataUrl)
+    ocrTabId = sender.tab?.id ?? null;
+    recognize(message.dataUrl, message.psm)
       .then(sendResponse)
       .catch((err) => sendResponse({ ok: false, error: describeError(err) }));
     return true; // 비동기 응답
@@ -100,6 +108,7 @@ async function runInTab(runType) {
 
 const OFFSCREEN_URL = 'offscreen/offscreen.html';
 let creatingOffscreen = null; // 동시 호출 시 생성 중인 promise를 공유한다
+let ocrTabId = null;          // 진행률을 전달할 탭 (가장 최근 OCR 요청)
 
 async function ensureOffscreen() {
   const contexts = await chrome.runtime.getContexts({
@@ -117,9 +126,9 @@ async function ensureOffscreen() {
   await creatingOffscreen;
 }
 
-async function recognize(dataUrl) {
+async function recognize(dataUrl, psm) {
   await ensureOffscreen();
-  const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'OCR_RUN', dataUrl });
+  const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'OCR_RUN', dataUrl, psm });
   return res ?? { ok: false, error: 'OCR 응답이 없습니다.' };
 }
 
