@@ -12,20 +12,25 @@
   // captureVisibleTab은 초당 2회 제한 → 연속 호출은 이 간격 이상 벌린다
   const MIN_CALL_GAP = 510;
   const MAX_CANVAS_DEVICE = 32000; // Canvas 하드 리밋
+  const OCR_TIMEOUT_MS = 30000;
 
   // 기본값은 background가 소유한다 (GET_SETTINGS로 받음)
   let settings = { maxHeight: 15000, onLimit: 'truncate', filenamePrefix: 'clip-shot', autoSave: false };
 
+  let ocrBusy = false;        // 캡처~인식 진행 중
+  let closeTextLayer = null;  // 텍스트 레이어가 떠 있으면 닫는 함수
+
   // ── 진입점 (background가 주입 후 tabs.sendMessage로 호출) ────────
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message?.type === 'RUN_PARTIAL') {
-      sendResponse({ ok: true });
-      startSelection();
-    } else if (message?.type === 'RUN_FULL') {
-      sendResponse({ ok: true });
-      runFullPage();
-    }
+    const type = message?.type;
+    if (type !== 'RUN_PARTIAL' && type !== 'RUN_FULL' && type !== 'RUN_OCR') return;
+    sendResponse({ ok: true });
+    if (ocrBusy) return; // 인식이 끝날 때까지 새 작업은 무시한다
+    if (closeTextLayer) closeTextLayer();
+    if (type === 'RUN_PARTIAL') startSelection('capture');
+    else if (type === 'RUN_OCR') startSelection('ocr');
+    else runFullPage();
   });
 
   async function loadSettings() {
@@ -95,9 +100,11 @@
 
   let active = false;
 
-  function startSelection() {
+  // mode: 'capture'(이미지 복사) | 'ocr'(텍스트 추출, 뷰포트 안에서만 선택)
+  function startSelection(mode) {
     if (active) return;
     active = true;
+    const isOcr = mode === 'ocr';
 
     const overlay = document.createElement('div');
     overlay.setAttribute('data-clip-shot', '1');
@@ -107,7 +114,9 @@
 
     const hint = document.createElement('span');
     hint.setAttribute('data-clip-shot', '1');
-    hint.textContent = '드래그로 선택 · 가장자리에 두면 스크롤 · Esc 취소';
+    hint.textContent = isOcr
+      ? '드래그로 텍스트 영역 선택 · Esc 취소'
+      : '드래그로 선택 · 가장자리에 두면 스크롤 · Esc 취소';
     hint.style.cssText =
       'position:fixed;top:16px;left:50%;transform:translateX(-50%);' +
       'padding:8px 14px;border-radius:999px;background:rgba(0,0,0,.72);color:#fff;' +
@@ -156,7 +165,7 @@
     }
 
     function autoScrollStep() {
-      if (!dragging) return;
+      if (!dragging || isOcr) return; // OCR은 스크롤 확장 없이 뷰포트 안에서만
       let dy = 0;
       if (lastClientY > window.innerHeight - EDGE) {
         // 하단 가장자리: 가까울수록 빠르게 아래로
@@ -191,18 +200,25 @@
       renderBox();
       rafId = requestAnimationFrame(autoScrollStep);
     }
+    // OCR은 포인터가 뷰포트 밖으로 나가도 선택을 뷰포트 안으로 제한한다
+    function clampX(x) {
+      return isOcr ? Math.min(Math.max(x, 0), window.innerWidth) : x;
+    }
+    function clampY(y) {
+      return isOcr ? Math.min(Math.max(y, 0), window.innerHeight) : y;
+    }
     function onPointerMove(e) {
       if (!dragging) return;
-      lastClientX = e.clientX;
-      lastClientY = e.clientY;
+      lastClientX = clampX(e.clientX);
+      lastClientY = clampY(e.clientY);
       renderBox();
     }
     function onPointerUp(e) {
       if (!dragging) return;
       dragging = false;
       cancelAnimationFrame(rafId);
-      const endPageX = e.clientX + window.scrollX;
-      const endPageY = e.clientY + window.scrollY;
+      const endPageX = clampX(e.clientX) + window.scrollX;
+      const endPageY = clampY(e.clientY) + window.scrollY;
       const rect = {
         x: Math.min(startPageX, endPageX),
         y: Math.min(startPageY, endPageY),
@@ -210,7 +226,9 @@
         h: Math.abs(endPageY - startPageY),
       };
       cleanup();
-      if (rect.w >= MIN_SIZE && rect.h >= MIN_SIZE) {
+      if (rect.w >= MIN_SIZE && rect.h >= MIN_SIZE && isOcr) {
+        runOcr(rect);
+      } else if (rect.w >= MIN_SIZE && rect.h >= MIN_SIZE) {
         loadSettings()
           .then(() => captureAndCopy(rect))
           .catch((err) => showBadge('캡처 실패: ' + describeError(err), true));
@@ -218,7 +236,7 @@
     }
     function onWheel(e) {
       e.preventDefault();
-      if (!dragging) return; // 드래그 전 스크롤은 차단 (좌표 기준 유지)
+      if (!dragging || isOcr) return; // 드래그 전 스크롤은 차단 (좌표 기준 유지)
       // 마우스처럼 드래그 중 휠 스크롤이 가능한 입력기의 확장 경로
       const dy = e.deltaMode === 1 ? e.deltaY * 16
         : e.deltaMode === 2 ? e.deltaY * window.innerHeight
@@ -250,6 +268,220 @@
     overlay.addEventListener('pointerup', onPointerUp);
     overlay.addEventListener('wheel', onWheel, { passive: false });
     overlay.addEventListener('contextmenu', onContextMenu);
+  }
+
+  // ── OCR ───────────────────────────────────────────────────────────
+
+  // rect: 페이지 CSS px (OCR 선택은 스크롤이 없으므로 뷰포트 안에 있다)
+  async function runOcr(rect) {
+    ocrBusy = true;
+    const t0 = performance.now();
+    let onEsc = null;
+    const aborted = new Promise((resolve) => {
+      onEsc = (e) => { if (e.key === 'Escape') resolve('aborted'); };
+      window.addEventListener('keydown', onEsc, true);
+    });
+    let shield = null;
+
+    try {
+      // 오버레이 제거가 화면 프레임에 반영된 뒤에 캡처해야 선택 박스가 안 찍힌다
+      await nextFrames(2);
+      const sx = window.scrollX;
+      const sy = window.scrollY;
+      const dpr = window.devicePixelRatio;
+      const res = await requestCapture();
+      shield = createShield('텍스트 인식 중… (Esc 취소)');
+
+      const bmp = await fetchBitmap(res.dataUrl);
+      const r = computeCropRect({ x: rect.x - sx, y: rect.y - sy, w: rect.w, h: rect.h }, dpr, bmp.width, bmp.height);
+      // 저해상도 화면은 2배 확대해야 작은 글자 인식률이 오른다
+      const scale = dpr < 2 ? 2 : 1;
+      const canvas = document.createElement('canvas');
+      canvas.width = r.w * scale;
+      canvas.height = r.h * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(bmp, r.x, r.y, r.w, r.h, 0, 0, canvas.width, canvas.height);
+      bmp.close();
+
+      const result = await Promise.race([
+        chrome.runtime.sendMessage({ type: 'OCR_RECOGNIZE', dataUrl: canvas.toDataURL('image/png') }),
+        aborted,
+        sleep(OCR_TIMEOUT_MS).then(() => ({ ok: false, error: '인식 시간 초과' })),
+      ]);
+      if (result === 'aborted') {
+        showBadge('텍스트 추출이 취소되었습니다', true);
+        return;
+      }
+      if (!result?.ok) throw new Error(result?.error ?? '알 수 없는 오류');
+      if (result.lines.length === 0) {
+        showBadge('인식된 텍스트가 없습니다', true);
+        return;
+      }
+
+      // bbox(확대된 이미지 px) → 영역 기준 CSS px
+      const k = dpr * scale;
+      const lines = assignParagraphs(result.lines.map((l) => ({
+        text: l.text,
+        x: l.bbox.x0 / k,
+        y: l.bbox.y0 / k,
+        w: (l.bbox.x1 - l.bbox.x0) / k,
+        h: (l.bbox.y1 - l.bbox.y0) / k,
+      })));
+      shield.remove();
+      shield = null;
+      renderTextLayer({ left: r.x / dpr + sx, top: r.y / dpr + sy, w: r.w / dpr, h: r.h / dpr }, lines);
+      console.log('[clip-shot] ocr ms', Math.round(performance.now() - t0));
+    } catch (err) {
+      showBadge('텍스트 인식 실패: ' + describeError(err), true);
+    } finally {
+      window.removeEventListener('keydown', onEsc, true);
+      if (shield) shield.remove();
+      ocrBusy = false;
+    }
+  }
+
+  // Tesseract의 문단 구분은 줄마다 끊기는 경우가 많아, 줄 간격(중심 사이 거리)으로 문단을 나눈다.
+  // 글자 높이는 줄마다 들쭉날쭉하므로 bbox 사이 빈 공간이 아니라 중심 간격을 비교한다.
+  function assignParagraphs(lines) {
+    const sorted = [...lines].sort((a, b) => a.y - b.y);
+    const center = (l) => l.y + l.h / 2;
+    const pitches = sorted.slice(1).map((l, i) => center(l) - center(sorted[i])).sort((a, b) => a - b);
+    const medianPitch = pitches[Math.floor(pitches.length / 2)] || 0;
+    let paragraph = 0;
+    sorted.forEach((l, i) => {
+      if (i > 0 && center(l) - center(sorted[i - 1]) > medianPitch * 1.4) paragraph += 1;
+      l.paragraph = paragraph;
+    });
+    return sorted;
+  }
+
+  // 원문 위에 선택 가능한 투명 텍스트를 겹친다 (macOS 라이브 텍스트 방식).
+  // 페이지 CSS·복사 차단 스크립트의 영향을 줄이려고 closed Shadow DOM에 그린다.
+  function renderTextLayer(region, lines) {
+    const host = document.createElement('div');
+    host.setAttribute('data-clip-shot', '1');
+    host.style.cssText =
+      'position:absolute;margin:0;padding:0;border:0;z-index:' + Z_INDEX +
+      ';left:' + region.left + 'px;top:' + region.top + 'px;width:' + region.w + 'px;height:' + region.h + 'px;';
+    const root = host.attachShadow({ mode: 'closed' });
+
+    const barInside = region.top - window.scrollY < 40; // 위에 공간이 없으면 영역 안쪽에 둔다
+    root.innerHTML =
+      '<style>' +
+      ':host{all:initial}' +
+      '.frame{position:absolute;inset:0;outline:2px solid rgba(99,102,241,.9);background:rgba(99,102,241,.06);cursor:text}' +
+      '.line{position:absolute;white-space:pre;color:transparent;font-family:system-ui,sans-serif;' +
+      'transform-origin:0 0;cursor:text;user-select:text;-webkit-user-select:text}' +
+      '.line::selection{background:rgba(99,102,241,.35);color:transparent}' +
+      '.bar{position:absolute;left:0;top:' + (barInside ? '6px' : '-38px') + ';display:flex;align-items:center;gap:6px;' +
+      'padding:5px 6px;border-radius:8px;background:#1f2430;color:#fff;font:12px/1 system-ui,sans-serif;' +
+      'white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.25);user-select:none;-webkit-user-select:none}' +
+      '.bar button{padding:5px 10px;border:none;border-radius:6px;font:inherit;font-weight:600;cursor:pointer;' +
+      'background:#374151;color:#fff}' +
+      '.bar button.primary{background:#4f46e5}' +
+      '.bar span{padding:0 4px;color:#cbd5e1}' +
+      '</style>' +
+      '<div class="frame"></div>' +
+      '<div class="bar"><button class="primary" data-act="copy">전체 복사</button>' +
+      '<button data-act="close">닫기</button><span></span></div>';
+    root.querySelector('.bar span').textContent = lines.length + '줄 인식';
+
+    const frame = root.querySelector('.frame');
+    const lineEls = lines.map((l) => {
+      const el = document.createElement('div');
+      el.className = 'line';
+      el.textContent = l.text;
+      el.style.left = l.x + 'px';
+      el.style.top = l.y + 'px';
+      el.style.height = l.h + 'px';
+      el.style.lineHeight = l.h + 'px';
+      el.style.fontSize = l.h * 0.85 + 'px';
+      frame.appendChild(el);
+      return el;
+    });
+
+    document.documentElement.appendChild(host);
+    // 글꼴 폭이 원문과 다르므로 측정 후 가로로 늘리거나 줄여 원문 폭에 맞춘다
+    lineEls.forEach((el, i) => {
+      const natural = el.getBoundingClientRect().width;
+      if (natural > 0) el.style.transform = 'scaleX(' + lines[i].w / natural + ')';
+    });
+
+    // 선택 범위에 걸친 줄만 모아 복사 텍스트를 만든다 (줄 \n, 문단 \n\n)
+    function joinLines(parts) {
+      let out = '';
+      let prev = null;
+      for (const p of parts) {
+        if (prev !== null) out += p.paragraph === prev ? '\n' : '\n\n';
+        out += p.text;
+        prev = p.paragraph;
+      }
+      return out;
+    }
+    function selectedText() {
+      const sel = root.getSelection ? root.getSelection() : document.getSelection();
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return '';
+      const range = sel.getRangeAt(0);
+      const parts = [];
+      lineEls.forEach((el, i) => {
+        if (!range.intersectsNode(el)) return;
+        const node = el.firstChild;
+        const start = range.startContainer === node ? range.startOffset : 0;
+        const end = range.endContainer === node ? range.endOffset
+          : range.endContainer === el && range.endOffset === 0 ? 0 : node.length;
+        const text = node.data.slice(start, end);
+        if (text) parts.push({ text, paragraph: lines[i].paragraph });
+      });
+      return joinLines(parts);
+    }
+    async function copy(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        showBadge(text.length + '자 복사됨 ✓');
+      } catch (_err) {
+        showBadge('복사 실패', true);
+      }
+    }
+
+    function onKeyDown(e) {
+      if (e.key === 'Escape') {
+        close();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+        const text = selectedText();
+        if (!text) return;
+        // 페이지의 복사 차단 핸들러보다 먼저 처리하고 전파를 끊는다
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        copy(text);
+      }
+    }
+    function onOutsidePointer(e) {
+      if (!e.composedPath().includes(host)) close();
+    }
+    function close() {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('pointerdown', onOutsidePointer, true);
+      window.removeEventListener('resize', close);
+      host.remove();
+      closeTextLayer = null;
+    }
+
+    root.querySelector('.bar').addEventListener('click', (e) => {
+      const act = e.target.closest('button')?.dataset.act;
+      if (act === 'copy') copy(joinLines(lines));
+      else if (act === 'close') close();
+    });
+    // 레이어 안의 선택·복사 이벤트가 페이지의 차단 핸들러까지 올라가지 않게 한다
+    for (const type of ['selectstart', 'mousedown', 'mouseup', 'pointerdown', 'dragstart', 'contextmenu', 'copy']) {
+      root.addEventListener(type, (e) => e.stopPropagation());
+    }
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('pointerdown', onOutsidePointer, true);
+    window.addEventListener('resize', close);
+    closeTextLayer = close;
   }
 
   // ── 캡처 엔진 ─────────────────────────────────────────────────────

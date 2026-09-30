@@ -7,14 +7,15 @@ const saveBtn = document.getElementById('save-png');
 const captureVisibleBtn = document.getElementById('capture-visible');
 const capturePartialBtn = document.getElementById('capture-partial');
 const captureFullBtn = document.getElementById('capture-full');
+const captureOcrBtn = document.getElementById('capture-ocr');
 
 let settings = null;
 
 // 단축키 안내는 플랫폼별 기본값(맥: ⌘⇧, 그 외: Alt+Shift)으로 표시한다
 const isMac = /Mac/i.test(navigator.platform);
 const SHORTCUTS = isMac
-  ? { 'capture-partial': '⌘⇧S' }
-  : { 'capture-partial': 'Alt+Shift+S' };
+  ? { 'capture-partial': '⌘⇧S', 'ocr-partial': '⌘⇧E' }
+  : { 'capture-partial': 'Alt+Shift+S', 'ocr-partial': 'Alt+Shift+E' };
 document.querySelectorAll('kbd[data-cmd]').forEach((kbd) => {
   kbd.textContent = SHORTCUTS[kbd.dataset.cmd] ?? '';
 });
@@ -24,6 +25,7 @@ captureVisibleBtn.addEventListener('click', () => capture(captureVisibleBtn));
 // 페이지에서 드래그/스크롤해야 하므로 팝업은 즉시 닫는다
 capturePartialBtn.addEventListener('click', () => startAndClose('START_PARTIAL', capturePartialBtn));
 captureFullBtn.addEventListener('click', () => startAndClose('START_FULL', captureFullBtn));
+captureOcrBtn.addEventListener('click', () => startAndClose('START_OCR', captureOcrBtn));
 
 saveBtn.addEventListener('click', () => {
   if (!saveBtn.dataset.dataUrl) return;

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>OCR 테스트 - 복사 차단</title>
+  <style>
+    body { user-select: none; -webkit-user-select: none; margin: 40px; font: 16px/1.7 system-ui, -apple-system, "Apple SD Gothic Neo", sans-serif; color: #1f2430; background: #fff; }
+    article { width: 640px; }
+    p { margin: 0 0 18px; }
+  </style>
+</head>
+<body>
+  <!-- 한글·영어 섞인 2문단 10줄. 줄바꿈은 <br>로 고정해 기기마다 같은 줄 구성을 유지한다 -->
+  <article id="sample">
+    <p>
+      Clip Shot은 캡처하면 즉시 클립보드에 복사되는 도구입니다.<br>
+      이번 버전에서는 OCR(Optical Character Recognition)을 지원합니다.<br>
+      드래그한 영역의 글자를 인식해 원문 위에 투명한 텍스트를 겹칩니다.<br>
+      Select only the part you need and press Cmd+C to copy it.<br>
+      모든 처리는 기기 안에서 이루어지며 서버로 전송되지 않습니다.
+    </p>
+    <p>
+      The quick brown fox jumps over the lazy dog 1234567890.<br>
+      다람쥐 헌 쳇바퀴에 타고파, 키스의 고유조건은 입술끼리 만나야 한다.<br>
+      Version 0.6.0 adds a text layer for copy-protected pages.<br>
+      가격: 12,900원 / 할인율 15% / 배송 2026-10-01 예정<br>
+      Email support@example.com or visit https://example.com/help
+    </p>
+  </article>
+  <script>
+    // 흔한 복사 방지 스크립트 흉내: 버블 단계에서 선택·복사·우클릭·단축키를 막는다
+    for (const type of ['copy', 'cut', 'contextmenu', 'selectstart', 'dragstart']) {
+      document.addEventListener(type, (e) => { e.preventDefault(); e.stopPropagation(); });
+    }
+    document.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && ['c', 'a', 'x'].includes(e.key.toLowerCase())) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
+  </script>
+</body>
+</html>

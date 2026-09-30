@@ -12,16 +12,29 @@ const DEFAULT_SETTINGS = {
   autoSave: false,           // 캡처 후 자동 저장
 };
 
+// 팝업 요청 → 탭에서 실행할 모드
+const START_TO_RUN = {
+  START_PARTIAL: 'RUN_PARTIAL',
+  START_FULL: 'RUN_FULL',
+  START_OCR: 'RUN_OCR',
+};
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.target === 'offscreen') return; // offscreen 문서가 처리한다
   if (message?.type === 'CAPTURE_VISIBLE') {
     captureVisible()
       .then(sendResponse)
       .catch((err) => sendResponse({ ok: false, error: describeError(err) }));
     return true; // 비동기 응답
   }
-  if (message?.type === 'START_PARTIAL' || message?.type === 'START_FULL') {
-    const runType = message.type === 'START_PARTIAL' ? 'RUN_PARTIAL' : 'RUN_FULL';
-    runInTab(runType)
+  if (START_TO_RUN[message?.type]) {
+    runInTab(START_TO_RUN[message.type])
+      .then(sendResponse)
+      .catch((err) => sendResponse({ ok: false, error: describeError(err) }));
+    return true; // 비동기 응답
+  }
+  if (message?.type === 'OCR_RECOGNIZE') {
+    recognize(message.dataUrl)
       .then(sendResponse)
       .catch((err) => sendResponse({ ok: false, error: describeError(err) }));
     return true; // 비동기 응답
@@ -38,6 +51,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 chrome.commands.onCommand.addListener((command) => {
   if (command === 'capture-partial') {
     runInTab('RUN_PARTIAL').catch(console.error);
+  } else if (command === 'ocr-partial') {
+    runInTab('RUN_OCR').catch(console.error);
   }
 });
 
@@ -79,6 +94,33 @@ async function runInTab(runType) {
     // 엔진이 즉시 응답하지 않는 경우는 무시 (작업은 비동기로 계속됨)
   }
   return { ok: true };
+}
+
+// ── OCR: Tesseract는 offscreen 문서에서 실행한다 (SW는 Web Worker를 쓸 수 없음) ──
+
+const OFFSCREEN_URL = 'offscreen/offscreen.html';
+let creatingOffscreen = null; // 동시 호출 시 생성 중인 promise를 공유한다
+
+async function ensureOffscreen() {
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+    documentUrls: [chrome.runtime.getURL(OFFSCREEN_URL)],
+  });
+  if (contexts.length > 0) return;
+  if (!creatingOffscreen) {
+    creatingOffscreen = chrome.offscreen.createDocument({
+      url: OFFSCREEN_URL,
+      reasons: ['WORKERS'],
+      justification: '캡처 이미지에서 텍스트를 인식(OCR)하는 Tesseract Web Worker 실행',
+    }).finally(() => { creatingOffscreen = null; });
+  }
+  await creatingOffscreen;
+}
+
+async function recognize(dataUrl) {
+  await ensureOffscreen();
+  const res = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'OCR_RUN', dataUrl });
+  return res ?? { ok: false, error: 'OCR 응답이 없습니다.' };
 }
 
 async function getSettings() {
