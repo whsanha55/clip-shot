@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Clip Shot",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "캡처하면 즉시 클립보드에 복사되는 스크린샷 확장 프로그램",
   "minimum_chrome_version": "116",
   "icons": {
@@ -25,13 +25,21 @@
   "permissions": [
     "activeTab",
     "clipboardWrite",
+    "offscreen",
     "scripting",
     "storage"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "commands": {
     "capture-partial": {
       "suggested_key": { "default": "Alt+Shift+S", "mac": "Command+Shift+S" },
       "description": "부분 캡처"
+    },
+    "ocr-partial": {
+      "suggested_key": { "default": "Alt+Shift+E", "mac": "Command+Shift+E" },
+      "description": "텍스트 추출(OCR)"
     }
   }
 }
